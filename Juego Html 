@@ -1,0 +1,971 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+  <title>Mundo 3D Bosque, Cabaña, NPCs y Perro</title>
+  <style>
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+      user-select: none;
+      -webkit-user-select: none;
+      touch-action: none;
+    }
+    body, html {
+      width: 100%;
+      height: 100%;
+      overflow: hidden;
+      background-color: #000;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    }
+    #webgl-container {
+      width: 100%;
+      height: 100%;
+      display: block;
+    }
+    
+    /* Mirilla */
+    #crosshair {
+      position: absolute;
+      top: 50%;
+      left: 50%;
+      width: 10px;
+      height: 10px;
+      transform: translate(-50%, -50%);
+      pointer-events: none;
+      z-index: 5;
+    }
+    #crosshair::before, #crosshair::after {
+      content: '';
+      position: absolute;
+      background: rgba(255, 255, 255, 0.7);
+    }
+    #crosshair::before { top: 4px; left: 0; width: 10px; height: 2px; }
+    #crosshair::after { top: 0; left: 4px; width: 2px; height: 10px; }
+
+    /* Joystick Táctil */
+    #joystick-zone {
+      position: absolute;
+      bottom: 30px;
+      left: 30px;
+      width: 120px;
+      height: 120px;
+      background: rgba(255, 255, 255, 0.1);
+      border: 2px solid rgba(255, 255, 255, 0.3);
+      border-radius: 50%;
+      z-index: 10;
+    }
+    #joystick-knob {
+      position: absolute;
+      top: 35px;
+      left: 35px;
+      width: 50px;
+      height: 50px;
+      background: rgba(255, 255, 255, 0.4);
+      border-radius: 50%;
+      pointer-events: none;
+    }
+
+    /* Interfaz Superior */
+    .ui-info {
+      position: absolute;
+      top: 12px;
+      left: 12px;
+      background: rgba(0, 0, 0, 0.6);
+      backdrop-filter: blur(6px);
+      padding: 8px 14px;
+      border-radius: 8px;
+      color: #fff;
+      font-size: 12px;
+      z-index: 10;
+      border: 1px solid rgba(255, 255, 255, 0.15);
+      pointer-events: none;
+    }
+
+    /* Pantalla de Inicio */
+    #click-to-play {
+      position: absolute;
+      width: 100%;
+      height: 100%;
+      background: rgba(0,0,0,0.85);
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      color: white;
+      font-size: 18px;
+      z-index: 20;
+      cursor: pointer;
+      text-align: center;
+      padding: 20px;
+    }
+  </style>
+
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+</head>
+<body>
+
+  <div id="click-to-play">
+    <div>
+      <h2>🏡 Cabaña, 6 Personajes y Perro en 3D 🐕</h2>
+      <p style="font-size: 13px; color: #ccc; margin-top: 10px;">
+        <b>Celular:</b> Joystick izquierdo para moverte, desliza la derecha para mirar.<br>
+        <b>PC:</b> Usa WASD para caminar y el ratón para rotar la cámara.
+      </p>
+    </div>
+  </div>
+
+  <div id="crosshair"></div>
+  <div id="webgl-container"></div>
+  <div id="joystick-zone"><div id="joystick-knob"></div></div>
+
+  <div class="ui-info"> Mundo Completo | Árboles: <span id="tree-count">0</span> | NPCs: 6 | Perro: 1</div>
+
+  <script>
+    let scene, camera, renderer;
+    let clock = new THREE.Clock();
+
+    // Controles y movimiento
+    let moveForward = false, moveBackward = false, moveLeft = false, moveRight = false;
+    let velocity = new THREE.Vector3();
+    let direction = new THREE.Vector3();
+    let euler = new THREE.Euler(0, 0, 0, 'YXZ');
+
+    // Táctil
+    let joystickTouchId = null;
+    let joystickOrigin = { x: 0, y: 0 };
+    let joystickMove = { x: 0, y: 0 };
+    let lookTouchId = null;
+    let lastLookPos = { x: 0, y: 0 };
+
+    // Obstáculos para colisiones
+    const obstacles = [];
+    const npcs = [];
+    let dogEntity = null;
+
+    // Referencias de la Cabaña y Puerta
+    let doorPivot = null;
+    let cabinWorldPos = new THREE.Vector3(0, 0, 0);
+
+    // Materiales globales
+    const woodMaterial = new THREE.MeshStandardMaterial({ color: 0x4a3222, roughness: 0.88, metalness: 0.05 });
+    const leafColors = [0x1b5e20, 0x2e7d32, 0x388e3c, 0x4caf50, 0x66bb6a];
+
+    // --- FUNCIÓN DE ELEVACIÓN DEL TERRENO ---
+    function getTerrainHeight(x, z) {
+      const h1 = Math.sin(x * 0.03) * Math.cos(z * 0.03) * 3.5;
+      const h2 = Math.sin(x * 0.08 + z * 0.05) * 1.5;
+      const h3 = Math.cos(x * 0.15 - z * 0.1) * 0.5;
+      return h1 + h2 + h3;
+    }
+
+    function init() {
+      const container = document.getElementById('webgl-container');
+
+      scene = new THREE.Scene();
+      scene.background = new THREE.Color(0x87ceeb);
+      scene.fog = new THREE.FogExp2(0x87ceeb, 0.015);
+
+      camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 500);
+      const startY = getTerrainHeight(0, 15) + 1.7;
+      camera.position.set(0, startY, 15);
+
+      renderer = new THREE.WebGLRenderer({ antialias: true });
+      renderer.setSize(window.innerWidth, window.innerHeight);
+      renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+      renderer.shadowMap.enabled = true;
+      renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+      container.appendChild(renderer.domElement);
+
+      // Luces
+      const ambientLight = new THREE.AmbientLight(0xffffff, 0.6);
+      scene.add(ambientLight);
+
+      const dirLight = new THREE.DirectionalLight(0xfffaed, 0.95);
+      dirLight.position.set(25, 50, 25);
+      dirLight.castShadow = true;
+      dirLight.shadow.mapSize.width = 2048;
+      dirLight.shadow.mapSize.height = 2048;
+      dirLight.shadow.camera.near = 0.5;
+      dirLight.shadow.camera.far = 140;
+      dirLight.shadow.camera.left = -60;
+      dirLight.shadow.camera.right = 60;
+      dirLight.shadow.camera.top = 60;
+      dirLight.shadow.camera.bottom = -60;
+      scene.add(dirLight);
+
+      // Terreno
+      const terrainGeo = new THREE.PlaneGeometry(350, 350, 120, 120);
+      terrainGeo.rotateX(-Math.PI / 2);
+      const posAttr = terrainGeo.attributes.position;
+      for (let i = 0; i < posAttr.count; i++) {
+        const vx = posAttr.getX(i);
+        const vz = posAttr.getZ(i);
+        posAttr.setY(i, getTerrainHeight(vx, vz));
+      }
+      terrainGeo.computeVertexNormals();
+
+      const terrainMat = new THREE.MeshStandardMaterial({ color: 0x33521e, roughness: 0.95, flatShading: true });
+      const terrain = new THREE.Mesh(terrainGeo, terrainMat);
+      terrain.receiveShadow = true;
+      scene.add(terrain);
+
+      // 1. Cabaña
+      buildCabin(0, 0);
+
+      // 2. Bosque
+      generateForest(40);
+
+      // 3. Personajes (6 NPCs)
+      spawnNPCs(6);
+
+      // 4. Perro
+      spawnDog(5, -4);
+
+      setupEvents();
+      window.addEventListener('resize', onWindowResize);
+      animate();
+    }
+
+    // --- CONSTRUCCIÓN DE LA CABAÑA DETALLADA Y MEJORADA ---
+    function buildCabin(x, z) {
+      const terrainY = getTerrainHeight(x, z);
+      const cabinGroup = new THREE.Group();
+      cabinGroup.position.set(x, terrainY, z);
+      cabinWorldPos.set(x, terrainY, z);
+
+      // Materiales
+      const logMat = new THREE.MeshStandardMaterial({ color: 0x4e3019, roughness: 0.85 });
+      const logDarkMat = new THREE.MeshStandardMaterial({ color: 0x3d2411, roughness: 0.9 });
+      const roofTilesMat = new THREE.MeshStandardMaterial({ color: 0x221811, roughness: 0.6 });
+      const stoneMat = new THREE.MeshStandardMaterial({ color: 0x555555, roughness: 0.95, flatShading: true });
+      const frameMat = new THREE.MeshStandardMaterial({ color: 0x2e1a0e, roughness: 0.8 });
+      const glassMat = new THREE.MeshStandardMaterial({ color: 0x88ccff, roughness: 0.1, metalness: 0.8, transparent: true, opacity: 0.5 });
+      const bedSheetMat = new THREE.MeshStandardMaterial({ color: 0xbf360c, roughness: 0.7 });
+      const pillowMat = new THREE.MeshStandardMaterial({ color: 0xeceff1, roughness: 0.9 });
+
+      // Dimensiones
+      const cabinWidth = 7.0;
+      const cabinDepth = 6.0;
+      const cabinHeight = 3.6;
+
+      // 1. Cimientos
+      const baseGeo = new THREE.BoxGeometry(7.4, 0.4, 6.4);
+      const baseMesh = new THREE.Mesh(baseGeo, stoneMat);
+      baseMesh.position.y = 0.2;
+      baseMesh.receiveShadow = true;
+      baseMesh.castShadow = true;
+      cabinGroup.add(baseMesh);
+
+      // Escalones de acceso
+      const step1 = new THREE.Mesh(new THREE.BoxGeometry(2.4, 0.2, 0.6), stoneMat);
+      step1.position.set(0, 0.1, 3.5);
+      cabinGroup.add(step1);
+
+      // 2. Paredes
+      const logRadius = 0.16;
+      const numLogs = Math.floor(cabinHeight / (logRadius * 1.75));
+
+      const logGeoX = new THREE.CylinderGeometry(logRadius, logRadius, cabinWidth, 10);
+      logGeoX.rotateZ(Math.PI / 2);
+      
+      const logGeoZ = new THREE.CylinderGeometry(logRadius, logRadius, cabinDepth, 10);
+      logGeoZ.rotateX(Math.PI / 2);
+
+      const doorWidth = 1.8;
+      const doorHeight = 2.8;
+
+      for (let i = 0; i < numLogs; i++) {
+        const yPos = 0.4 + i * (logRadius * 1.75);
+
+        // Trasera
+        const logBack = new THREE.Mesh(logGeoX, logMat);
+        logBack.position.set(0, yPos, -cabinDepth / 2);
+        logBack.castShadow = true;
+        logBack.receiveShadow = true;
+        cabinGroup.add(logBack);
+
+        // Izquierda
+        const logLeft = new THREE.Mesh(logGeoZ, logDarkMat);
+        logLeft.position.set(-cabinWidth / 2, yPos, 0);
+        logLeft.castShadow = true;
+        logLeft.receiveShadow = true;
+        cabinGroup.add(logLeft);
+
+        // Derecha
+        const logRight = new THREE.Mesh(logGeoZ, logDarkMat);
+        logRight.position.set(cabinWidth / 2, yPos, 0);
+        logRight.castShadow = true;
+        logRight.receiveShadow = true;
+        cabinGroup.add(logRight);
+
+        // Frontal con espacio libre
+        if (yPos > doorHeight + 0.1) {
+          const logFront = new THREE.Mesh(logGeoX, logMat);
+          logFront.position.set(0, yPos, cabinDepth / 2);
+          logFront.castShadow = true;
+          cabinGroup.add(logFront);
+        } else {
+          const sideWidth = (cabinWidth - doorWidth) / 2;
+          const logGeoSide = new THREE.CylinderGeometry(logRadius, logRadius, sideWidth, 10);
+          logGeoSide.rotateZ(Math.PI / 2);
+
+          const logFrontL = new THREE.Mesh(logGeoSide, logMat);
+          logFrontL.position.set(-cabinWidth / 2 + sideWidth / 2, yPos, cabinDepth / 2);
+          logFrontL.castShadow = true;
+          cabinGroup.add(logFrontL);
+
+          const logFrontR = new THREE.Mesh(logGeoSide, logMat);
+          logFrontR.position.set(cabinWidth / 2 - sideWidth / 2, yPos, cabinDepth / 2);
+          logFrontR.castShadow = true;
+          cabinGroup.add(logFrontR);
+        }
+      }
+
+      // Marco de la Puerta
+      const frameTop = new THREE.Mesh(new THREE.BoxGeometry(doorWidth + 0.2, 0.2, 0.35), frameMat);
+      frameTop.position.set(0, doorHeight + 0.1, cabinDepth / 2);
+      cabinGroup.add(frameTop);
+
+      const frameL = new THREE.Mesh(new THREE.BoxGeometry(0.2, doorHeight, 0.35), frameMat);
+      frameL.position.set(-doorWidth / 2 - 0.1, doorHeight / 2 + 0.2, cabinDepth / 2);
+      cabinGroup.add(frameL);
+
+      const frameR = new THREE.Mesh(new THREE.BoxGeometry(0.2, doorHeight, 0.35), frameMat);
+      frameR.position.set(doorWidth / 2 + 0.1, doorHeight / 2 + 0.2, cabinDepth / 2);
+      cabinGroup.add(frameR);
+
+      // Puerta Articulada
+      doorPivot = new THREE.Group();
+      doorPivot.position.set(-doorWidth / 2, 0.2, cabinDepth / 2 + 0.05); 
+
+      const doorMesh = new THREE.Mesh(new THREE.BoxGeometry(doorWidth, doorHeight, 0.12), logMat);
+      doorMesh.position.set(doorWidth / 2, doorHeight / 2, 0);
+      doorMesh.castShadow = true;
+
+      const knobMat = new THREE.MeshStandardMaterial({ color: 0xddaa33, metalness: 0.8, roughness: 0.2 });
+      const knob = new THREE.Mesh(new THREE.SphereGeometry(0.08, 8, 8), knobMat);
+      knob.position.set(doorWidth - 0.2, doorHeight / 2, 0.08);
+      doorMesh.add(knob);
+
+      doorPivot.add(doorMesh);
+      cabinGroup.add(doorPivot);
+
+      // Ventanas
+      function addWindow(wx, wy, wz, rotY = 0) {
+        const winGroup = new THREE.Group();
+        winGroup.position.set(wx, wy, wz);
+        winGroup.rotation.y = rotY;
+
+        const outerFrame = new THREE.Mesh(new THREE.BoxGeometry(1.4, 1.2, 0.15), frameMat);
+        winGroup.add(outerFrame);
+
+        const glass = new THREE.Mesh(new THREE.PlaneGeometry(1.2, 1.0), glassMat);
+        glass.position.z = 0.08;
+        winGroup.add(glass);
+
+        cabinGroup.add(winGroup);
+      }
+
+      addWindow(-cabinWidth / 2 - 0.02, 2.0, 0, -Math.PI / 2);
+      addWindow(cabinWidth / 2 + 0.02, 2.0, 0, Math.PI / 2);
+
+      // Techo
+      const roofGroup = new THREE.Group();
+      roofGroup.position.y = cabinHeight + 0.2;
+
+      const roofGeo = new THREE.ConeGeometry(5.4, 2.5, 4);
+      roofGeo.rotateY(Math.PI / 4);
+      const roofMesh = new THREE.Mesh(roofGeo, roofTilesMat);
+      roofMesh.position.y = 1.2;
+      roofMesh.scale.set(0.98, 1.0, 1.35);
+      roofMesh.castShadow = true;
+      roofMesh.receiveShadow = true;
+      roofGroup.add(roofMesh);
+
+      cabinGroup.add(roofGroup);
+
+      // Chimenea
+      const chimneyBase = new THREE.Mesh(new THREE.BoxGeometry(1.0, 5.0, 1.0), stoneMat);
+      chimneyBase.position.set(2.2, 2.5, -1.8);
+      chimneyBase.castShadow = true;
+      cabinGroup.add(chimneyBase);
+
+      // Mobiliario Interior
+      const bedGroup = new THREE.Group();
+      bedGroup.position.set(-2.2, 0.4, -1.8);
+
+      const bedFrame = new THREE.Mesh(new THREE.BoxGeometry(1.6, 0.4, 2.2), frameMat);
+      bedFrame.position.y = 0.2;
+      bedGroup.add(bedFrame);
+
+      const mattress = new THREE.Mesh(new THREE.BoxGeometry(1.5, 0.3, 2.0), bedSheetMat);
+      mattress.position.set(0, 0.45, 0);
+      bedGroup.add(mattress);
+
+      const pillow = new THREE.Mesh(new THREE.BoxGeometry(1.2, 0.15, 0.5), pillowMat);
+      pillow.position.set(0, 0.6, -0.65);
+      bedGroup.add(pillow);
+
+      cabinGroup.add(bedGroup);
+
+      const nightstand = new THREE.Mesh(new THREE.BoxGeometry(0.6, 0.7, 0.6), frameMat);
+      nightstand.position.set(-1.0, 0.55, -2.4);
+      cabinGroup.add(nightstand);
+
+      const lampBase = new THREE.Mesh(new THREE.CylinderGeometry(0.1, 0.15, 0.3), stoneMat);
+      lampBase.position.set(-1.0, 1.0, -2.4);
+      cabinGroup.add(lampBase);
+
+      const lampLight = new THREE.PointLight(0xffaa44, 0.8, 6);
+      lampLight.position.set(-1.0, 1.3, -2.4);
+      cabinGroup.add(lampLight);
+
+      const table = new THREE.Mesh(new THREE.BoxGeometry(1.4, 0.8, 1.0), frameMat);
+      table.position.set(1.8, 0.6, -0.5);
+      table.castShadow = true;
+      cabinGroup.add(table);
+
+      const chair1 = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.5, 0.5), frameMat);
+      chair1.position.set(1.8, 0.45, 0.3);
+      cabinGroup.add(chair1);
+
+      const chair2 = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.5, 0.5), frameMat);
+      chair2.position.set(1.8, 0.45, -1.3);
+      cabinGroup.add(chair2);
+
+      const bookshelf = new THREE.Mesh(new THREE.BoxGeometry(1.2, 1.8, 0.4), frameMat);
+      bookshelf.position.set(-2.5, 1.1, 1.0);
+      bookshelf.rotation.y = Math.PI / 2;
+      cabinGroup.add(bookshelf);
+
+      scene.add(cabinGroup);
+
+      // Colisiones
+      obstacles.push({ x: x - cabinWidth / 2, z: z, radius: 0.6 });
+      obstacles.push({ x: x + cabinWidth / 2, z: z, radius: 0.6 });
+      obstacles.push({ x: x, z: z - cabinDepth / 2, radius: 0.6 });
+      obstacles.push({ x: x - 2.2, z: z + cabinDepth / 2, radius: 0.5 });
+      obstacles.push({ x: x + 2.2, z: z + cabinDepth / 2, radius: 0.5 });
+    }
+
+    // --- CONSTRUCTOR DE ÁRBOLES ---
+    function buildDenseTree(x, z, scale = 1) {
+      const terrainY = getTerrainHeight(x, z);
+      const treeGroup = new THREE.Group();
+      treeGroup.position.set(x, terrainY, z);
+      treeGroup.scale.set(scale, scale, scale);
+
+      const trunkHeight = 2.4;
+      const trunkRadiusBottom = 0.5;
+      const trunkRadiusTop = 0.32;
+
+      const trunkGeo = new THREE.CylinderGeometry(trunkRadiusTop, trunkRadiusBottom, trunkHeight, 8);
+      trunkGeo.translate(0, trunkHeight / 2, 0);
+      const trunkMesh = new THREE.Mesh(trunkGeo, woodMaterial);
+      trunkMesh.castShadow = true;
+      trunkMesh.receiveShadow = true;
+      treeGroup.add(trunkMesh);
+
+      const tipPositions = [];
+
+      function createBranch(startPos, direction, length, radius, depth) {
+        const branchGeo = new THREE.CylinderGeometry(radius * 0.7, radius, length, 6);
+        branchGeo.translate(0, length / 2, 0);
+        const branch = new THREE.Mesh(branchGeo, woodMaterial);
+        branch.position.copy(startPos);
+        
+        const targetPos = new THREE.Vector3().addVectors(startPos, direction.clone().multiplyScalar(length));
+        branch.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), direction.clone().normalize());
+        branch.castShadow = true;
+        branch.receiveShadow = true;
+        treeGroup.add(branch);
+
+        if (depth === 0) {
+          tipPositions.push({ pos: targetPos });
+          return;
+        }
+
+        const numBranches = 2 + (Math.random() > 0.4 ? 1 : 0);
+        for (let i = 0; i < numBranches; i++) {
+          const newDir = direction.clone();
+          const spreadAngle = 0.35 + Math.random() * 0.35;
+          const randomAxis = new THREE.Vector3(Math.random() - 0.5, (Math.random() - 0.2) * 0.5, Math.random() - 0.5).normalize();
+          newDir.applyAxisAngle(randomAxis, spreadAngle).normalize();
+          createBranch(targetPos, newDir, length * 0.74, radius * 0.68, depth - 1);
+        }
+      }
+
+      const trunkTopPos = new THREE.Vector3(0, trunkHeight, 0);
+      for (let i = 0; i < 4; i++) {
+        const angle = (i / 4) * Math.PI * 2 + (Math.random() * 0.2);
+        const dir = new THREE.Vector3(Math.cos(angle) * 0.7, 0.55 + Math.random() * 0.25, Math.sin(angle) * 0.7).normalize();
+        createBranch(trunkTopPos, dir, 1.3, trunkRadiusTop * 0.85, 3);
+      }
+
+      const leafShape = new THREE.Shape();
+      leafShape.moveTo(0, 0);
+      leafShape.bezierCurveTo(0.12, 0.15, 0.18, 0.4, 0, 0.6);
+      leafShape.bezierCurveTo(-0.18, 0.4, -0.12, 0.15, 0, 0);
+      const leafGeo = new THREE.ShapeGeometry(leafShape);
+      leafGeo.scale(0.85, 0.85, 0.85);
+
+      const leavesPerTip = 70;
+      const leafMat = new THREE.MeshStandardMaterial({ side: THREE.DoubleSide, roughness: 0.55 });
+      const leafMesh = new THREE.InstancedMesh(leafGeo, leafMat, tipPositions.length * leavesPerTip);
+      leafMesh.castShadow = true;
+
+      const dummy = new THREE.Object3D();
+      let idx = 0;
+
+      tipPositions.forEach(tip => {
+        for (let i = 0; i < leavesPerTip; i++) {
+          const offset = new THREE.Vector3((Math.random() - 0.5) * 1.5, (Math.random() - 0.5) * 1.5, (Math.random() - 0.5) * 1.5);
+          dummy.position.copy(tip.pos.clone().add(offset));
+          dummy.rotation.set(Math.random() * Math.PI, Math.random() * Math.PI, Math.random() * Math.PI);
+          const s = 0.8 + Math.random() * 0.5;
+          dummy.scale.set(s, s, s);
+          dummy.updateMatrix();
+
+          leafMesh.setMatrixAt(idx, dummy.matrix);
+          leafMesh.setColorAt(idx, new THREE.Color(leafColors[Math.floor(Math.random() * leafColors.length)]));
+          idx++;
+        }
+      });
+
+      leafMesh.instanceMatrix.needsUpdate = true;
+      if (leafMesh.instanceColor) leafMesh.instanceColor.needsUpdate = true;
+      treeGroup.add(leafMesh);
+
+      scene.add(treeGroup);
+      obstacles.push({ x: x, z: z, radius: 0.8 * scale });
+    }
+
+    function generateForest(count) {
+      document.getElementById('tree-count').innerText = count;
+      let generated = 0;
+      while (generated < count) {
+        const angle = Math.random() * Math.PI * 2;
+        const dist = 10 + Math.random() * 80;
+        const x = Math.cos(angle) * dist;
+        const z = Math.sin(angle) * dist;
+
+        if (Math.hypot(x, z) > 7) {
+          const scale = 0.85 + Math.random() * 0.45;
+          buildDenseTree(x, z, scale);
+          generated++;
+        }
+      }
+    }
+
+    // --- CREACIÓN DE PERSONAJES ---
+    function spawnNPCs(count) {
+      const shirtColors = [0xd9534f, 0x0275d8, 0x5cb85c, 0xf0ad4e, 0x6f42c1, 0x17a2b8];
+
+      for (let i = 0; i < count; i++) {
+        const npcGroup = new THREE.Group();
+        
+        const bodyMat = new THREE.MeshStandardMaterial({ color: shirtColors[i % shirtColors.length] });
+        const torso = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.7, 0.3), bodyMat);
+        torso.position.y = 0.95;
+        torso.castShadow = true;
+        npcGroup.add(torso);
+
+        const headMat = new THREE.MeshStandardMaterial({ color: 0xffdbac });
+        const head = new THREE.Mesh(new THREE.SphereGeometry(0.2, 12, 12), headMat);
+        head.position.y = 1.5;
+        head.castShadow = true;
+        npcGroup.add(head);
+
+        const armGeo = new THREE.BoxGeometry(0.12, 0.5, 0.12);
+        armGeo.translate(0, -0.25, 0);
+        
+        const leftArm = new THREE.Mesh(armGeo, bodyMat);
+        leftArm.position.set(-0.32, 1.25, 0);
+        leftArm.castShadow = true;
+        npcGroup.add(leftArm);
+
+        const rightArm = new THREE.Mesh(armGeo, bodyMat);
+        rightArm.position.set(0.32, 1.25, 0);
+        rightArm.castShadow = true;
+        npcGroup.add(rightArm);
+
+        const legMat = new THREE.MeshStandardMaterial({ color: 0x222222 });
+        const legGeo = new THREE.BoxGeometry(0.16, 0.6, 0.16);
+        legGeo.translate(0, -0.3, 0);
+
+        const leftLeg = new THREE.Mesh(legGeo, legMat);
+        leftLeg.position.set(-0.15, 0.6, 0);
+        leftLeg.castShadow = true;
+        npcGroup.add(leftLeg);
+
+        const rightLeg = new THREE.Mesh(legGeo, legMat);
+        rightLeg.position.set(0.15, 0.6, 0);
+        rightLeg.castShadow = true;
+        npcGroup.add(rightLeg);
+
+        const angle = (i / count) * Math.PI * 2;
+        const dist = 10 + Math.random() * 15;
+        const x = Math.cos(angle) * dist;
+        const z = Math.sin(angle) * dist;
+
+        npcGroup.position.set(x, getTerrainHeight(x, z), z);
+        scene.add(npcGroup);
+
+        npcs.push({
+          id: i,
+          group: npcGroup,
+          leftArm: leftArm,
+          rightArm: rightArm,
+          leftLeg: leftLeg,
+          rightLeg: rightLeg,
+          target: new THREE.Vector3(x, 0, z),
+          waypointState: 0,
+          speed: 2.5 + Math.random() * 1.0,
+          walkCycle: Math.random() * 10,
+          radius: 0.4
+        });
+      }
+    }
+
+    // --- CREACIÓN DEL PERRO ---
+    function spawnDog(x, z) {
+      const dogGroup = new THREE.Group();
+      const dogMat = new THREE.MeshStandardMaterial({ color: 0xc68a4c, roughness: 0.8 });
+
+      const body = new THREE.Mesh(new THREE.BoxGeometry(0.35, 0.35, 0.7), dogMat);
+      body.position.y = 0.4;
+      body.castShadow = true;
+      dogGroup.add(body);
+
+      const head = new THREE.Mesh(new THREE.BoxGeometry(0.25, 0.25, 0.3), dogMat);
+      head.position.set(0, 0.6, 0.35);
+      head.castShadow = true;
+      dogGroup.add(head);
+
+      const snoutMat = new THREE.MeshStandardMaterial({ color: 0x332211 });
+      const snout = new THREE.Mesh(new THREE.BoxGeometry(0.12, 0.1, 0.15), snoutMat);
+      snout.position.set(0, 0.55, 0.52);
+      dogGroup.add(snout);
+
+      const legGeo = new THREE.BoxGeometry(0.1, 0.3, 0.1);
+      legGeo.translate(0, -0.15, 0);
+
+      const legFL = new THREE.Mesh(legGeo, dogMat);
+      legFL.position.set(-0.14, 0.3, 0.25);
+      dogGroup.add(legFL);
+
+      const legFR = new THREE.Mesh(legGeo, dogMat);
+      legFR.position.set(0.14, 0.3, 0.25);
+      dogGroup.add(legFR);
+
+      const legBL = new THREE.Mesh(legGeo, dogMat);
+      legBL.position.set(-0.14, 0.3, -0.25);
+      dogGroup.add(legBL);
+
+      const legBR = new THREE.Mesh(legGeo, dogMat);
+      legBR.position.set(0.14, 0.3, -0.25);
+      dogGroup.add(legBR);
+
+      const tail = new THREE.Mesh(new THREE.BoxGeometry(0.06, 0.25, 0.06), dogMat);
+      tail.position.set(0, 0.5, -0.35);
+      tail.rotation.x = -Math.PI / 4;
+      dogGroup.add(tail);
+
+      const terrainY = getTerrainHeight(x, z);
+      dogGroup.position.set(x, terrainY, z);
+      scene.add(dogGroup);
+
+      dogEntity = {
+        group: dogGroup,
+        legFL: legFL,
+        legFR: legFR,
+        legBL: legBL,
+        legBR: legBR,
+        tail: tail,
+        target: new THREE.Vector3(x, 0, z),
+        speed: 3.5,
+        walkCycle: 0,
+        radius: 0.35
+      };
+    }
+
+    // --- CONTROLES MÁS ÁGILES ---
+    function setupEvents() {
+      const clickOverlay = document.getElementById('click-to-play');
+      
+      clickOverlay.addEventListener('click', () => {
+        clickOverlay.style.display = 'none';
+        if (!('ontouchstart' in window)) {
+          document.body.requestPointerLock();
+        }
+      });
+
+      window.addEventListener('keydown', (e) => {
+        if (e.code === 'KeyW' || e.code === 'ArrowUp') moveForward = true;
+        if (e.code === 'KeyS' || e.code === 'ArrowDown') moveBackward = true;
+        if (e.code === 'KeyA' || e.code === 'ArrowLeft') moveLeft = true;
+        if (e.code === 'KeyD' || e.code === 'ArrowRight') moveRight = true;
+      });
+
+      window.addEventListener('keyup', (e) => {
+        if (e.code === 'KeyW' || e.code === 'ArrowUp') moveForward = false;
+        if (e.code === 'KeyS' || e.code === 'ArrowDown') moveBackward = false;
+        if (e.code === 'KeyA' || e.code === 'ArrowLeft') moveLeft = false;
+        if (e.code === 'KeyD' || e.code === 'ArrowRight') moveRight = false;
+      });
+
+      // Rotación del Ratón en PC (Sensibilidad aumentada)
+      window.addEventListener('mousemove', (e) => {
+        if (document.pointerLockElement === document.body) {
+          euler.y -= e.movementX * 0.004;
+          euler.x -= e.movementY * 0.004;
+          euler.x = Math.max(-Math.PI / 2.2, Math.min(Math.PI / 2.2, euler.x));
+          camera.quaternion.setFromEuler(euler);
+        }
+      });
+
+      // Eventos Táctiles (Sensibilidad aumentada)
+      const joystickZone = document.getElementById('joystick-zone');
+      const joystickKnob = document.getElementById('joystick-knob');
+
+      window.addEventListener('touchstart', (e) => {
+        for (let touch of e.changedTouches) {
+          if (touch.clientX < window.innerWidth / 2 && joystickTouchId === null) {
+            joystickTouchId = touch.identifier;
+            const rect = joystickZone.getBoundingClientRect();
+            joystickOrigin = { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
+            updateJoystick(touch);
+          } else if (touch.clientX >= window.innerWidth / 2 && lookTouchId === null) {
+            lookTouchId = touch.identifier;
+            lastLookPos = { x: touch.clientX, y: touch.clientY };
+          }
+        }
+      });
+
+      window.addEventListener('touchmove', (e) => {
+        for (let touch of e.changedTouches) {
+          if (touch.identifier === joystickTouchId) {
+            updateJoystick(touch);
+          } else if (touch.identifier === lookTouchId) {
+            const deltaX = touch.clientX - lastLookPos.x;
+            const deltaY = touch.clientY - lastLookPos.y;
+            
+            euler.y -= deltaX * 0.008;
+            euler.x -= deltaY * 0.008;
+            euler.x = Math.max(-Math.PI / 2.2, Math.min(Math.PI / 2.2, euler.x));
+            camera.quaternion.setFromEuler(euler);
+
+            lastLookPos = { x: touch.clientX, y: touch.clientY };
+          }
+        }
+      });
+
+      function resetJoystick() {
+        joystickTouchId = null;
+        joystickMove = { x: 0, y: 0 };
+        joystickKnob.style.transform = `translate(0px, 0px)`;
+      }
+
+      window.addEventListener('touchend', (e) => {
+        for (let touch of e.changedTouches) {
+          if (touch.identifier === joystickTouchId) resetJoystick();
+          if (touch.identifier === lookTouchId) lookTouchId = null;
+        }
+      });
+
+      function updateJoystick(touch) {
+        const dx = touch.clientX - joystickOrigin.x;
+        const dy = touch.clientY - joystickOrigin.y;
+        const dist = Math.hypot(dx, dy);
+        const maxDist = 35;
+
+        const angle = Math.atan2(dy, dx);
+        const clampedDist = Math.min(dist, maxDist);
+
+        const knobX = Math.cos(angle) * clampedDist;
+        const knobY = Math.sin(angle) * clampedDist;
+
+        joystickKnob.style.transform = `translate(${knobX}px, ${knobY}px)`;
+        joystickMove = { x: knobX / maxDist, y: knobY / maxDist };
+      }
+    }
+
+    function onWindowResize() {
+      camera.aspect = window.innerWidth / window.innerHeight;
+      camera.updateProjectionMatrix();
+      renderer.setSize(window.innerWidth, window.innerHeight);
+    }
+
+    // --- COLISIONES RIGIDAS ---
+    function resolveCollisions(pos, radius) {
+      for (let obs of obstacles) {
+        const dx = pos.x - obs.x;
+        const dz = pos.z - obs.z;
+        const dist = Math.hypot(dx, dz);
+        const minDist = obs.radius + radius;
+
+        if (dist < minDist && dist > 0) {
+          const overlap = minDist - dist;
+          pos.x += (dx / dist) * overlap;
+          pos.z += (dz / dist) * overlap;
+        }
+      }
+    }
+
+    // --- BUCLE DE ANIMACIÓN ---
+    function animate() {
+      requestAnimationFrame(animate);
+
+      const delta = clock.getDelta();
+      const time = clock.getElapsedTime();
+
+      // 1. Movimiento del Jugador Rápido y Responsivo
+      velocity.x -= velocity.x * 14.0 * delta;
+      velocity.z -= velocity.z * 14.0 * delta;
+
+      direction.z = Number(moveForward) - Number(moveBackward);
+      direction.x = Number(moveRight) - Number(moveLeft);
+
+      if (joystickTouchId !== null) {
+        direction.z = -joystickMove.y;
+        direction.x = joystickMove.x;
+      }
+
+      direction.normalize();
+
+      const speed = 18.0; // Velocidad de caminata aumentada
+      if (moveForward || moveBackward || moveLeft || moveRight || joystickTouchId !== null) {
+        velocity.z -= direction.z * speed * delta;
+        velocity.x -= direction.x * speed * delta;
+      }
+
+      camera.translateX(-velocity.x * delta);
+      camera.translateZ(velocity.z * delta);
+
+      // Colisiones
+      resolveCollisions(camera.position, 0.4);
+
+      // Elevación de terreno / Suelo interno
+      const currentTerrainY = getTerrainHeight(camera.position.x, camera.position.z);
+      const isInsideCabin = Math.abs(camera.position.x - cabinWorldPos.x) < 3.2 && Math.abs(camera.position.z - cabinWorldPos.z) < 2.7;
+      const floorY = isInsideCabin ? cabinWorldPos.y + 0.4 : currentTerrainY;
+      
+      camera.position.y = floorY + 1.7;
+
+      // 2. Control de Puerta y Navegación de NPCs
+      const doorEntrancePos = new THREE.Vector3(cabinWorldPos.x, cabinWorldPos.y, cabinWorldPos.z + 3.0);
+      let nearDoor = camera.position.distanceTo(doorEntrancePos) < 3.5;
+
+      npcs.forEach(npc => {
+        if (npc.id === 0 || npc.id === 1) {
+          const cycleTime = 18; 
+          const offset = npc.id * 9;
+          const isGoingInside = Math.floor((time + offset) / cycleTime) % 2 === 0;
+
+          if (isGoingInside) {
+            if (npc.waypointState === 0) {
+              npc.target.set(cabinWorldPos.x, 0, cabinWorldPos.z + 4.5);
+              if (npc.group.position.distanceTo(npc.target) < 1.0) npc.waypointState = 1;
+            } else if (npc.waypointState === 1) {
+              npc.target.set(cabinWorldPos.x, 0, cabinWorldPos.z + 0.5);
+            }
+          } else {
+            if (npc.waypointState === 1) {
+              npc.target.set(cabinWorldPos.x, 0, cabinWorldPos.z + 4.5);
+              if (npc.group.position.distanceTo(npc.target) < 1.0) npc.waypointState = 0;
+            } else {
+              if (npc.target.distanceTo(cabinWorldPos) < 3.0) {
+                const randAngle = Math.random() * Math.PI * 2;
+                const randDist = 12 + Math.random() * 15;
+                npc.target.set(cabinWorldPos.x + Math.cos(randAngle) * randDist, 0, cabinWorldPos.z + Math.sin(randAngle) * randDist);
+              }
+            }
+          }
+        }
+
+        if (npc.group.position.distanceTo(doorEntrancePos) < 3.0) {
+          nearDoor = true;
+        }
+
+        const pos = npc.group.position;
+        const distToTarget = Math.hypot(npc.target.x - pos.x, npc.target.z - pos.z);
+
+        if (distToTarget < 1.0 && npc.id > 1) {
+          const randAngle = Math.random() * Math.PI * 2;
+          const randDist = 8 + Math.random() * 20;
+          npc.target.set(pos.x + Math.cos(randAngle) * randDist, 0, pos.z + Math.sin(randAngle) * randDist);
+        }
+
+        const dirX = npc.target.x - pos.x;
+        const dirZ = npc.target.z - pos.z;
+        const len = Math.hypot(dirX, dirZ);
+
+        if (len > 0.1) {
+          pos.x += (dirX / len) * npc.speed * delta;
+          pos.z += (dirZ / len) * npc.speed * delta;
+
+          npc.group.rotation.y = Math.atan2(dirX, dirZ);
+
+          resolveCollisions(pos, npc.radius);
+
+          const npcInside = Math.abs(pos.x - cabinWorldPos.x) < 3.2 && Math.abs(pos.z - cabinWorldPos.z) < 2.7;
+          pos.y = npcInside ? cabinWorldPos.y + 0.4 : getTerrainHeight(pos.x, pos.z);
+
+          npc.walkCycle += delta * npc.speed * 4.5;
+          const swing = Math.sin(npc.walkCycle) * 0.6;
+          npc.leftLeg.rotation.x = swing;
+          npc.rightLeg.rotation.x = -swing;
+          npc.leftArm.rotation.x = -swing;
+          npc.rightArm.rotation.x = swing;
+        }
+      });
+
+      // Animación suave de la puerta
+      if (doorPivot) {
+        const targetAngle = nearDoor ? -Math.PI / 2.0 : 0;
+        doorPivot.rotation.y += (targetAngle - doorPivot.rotation.y) * 4.0 * delta;
+      }
+
+      // 3. Perro
+      if (dogEntity) {
+        const dPos = dogEntity.group.position;
+        const distToTarget = Math.hypot(dogEntity.target.x - dPos.x, dogEntity.target.z - dPos.z);
+
+        if (distToTarget < 1.2 || Math.random() < 0.005) {
+          const randAngle = Math.random() * Math.PI * 2;
+          const randDist = 6 + Math.random() * 16;
+          dogEntity.target.set(dPos.x + Math.cos(randAngle) * randDist, 0, dPos.z + Math.sin(randAngle) * randDist);
+        }
+
+        const dirX = dogEntity.target.x - dPos.x;
+        const dirZ = dogEntity.target.z - dPos.z;
+        const len = Math.hypot(dirX, dirZ);
+
+        if (len > 0.1) {
+          dPos.x += (dirX / len) * dogEntity.speed * delta;
+          dPos.z += (dirZ / len) * dogEntity.speed * delta;
+
+          dogEntity.group.rotation.y = Math.atan2(dirX, dirZ);
+
+          resolveCollisions(dPos, dogEntity.radius);
+          dPos.y = getTerrainHeight(dPos.x, dPos.z);
+
+          dogEntity.walkCycle += delta * dogEntity.speed * 6.0;
+          const swing = Math.sin(dogEntity.walkCycle) * 0.5;
+          dogEntity.legFL.rotation.x = swing;
+          dogEntity.legBR.rotation.x = swing;
+          dogEntity.legFR.rotation.x = -swing;
+          dogEntity.legBL.rotation.x = -swing;
+          dogEntity.tail.rotation.z = Math.sin(dogEntity.walkCycle * 2) * 0.3;
+        }
+      }
+
+      renderer.render(scene, camera);
+    }
+
+    init();
+  </script>
+</body>
+</html>
